@@ -1,0 +1,20 @@
+/**
+ * Claves de mapeo de cuentas PUC por empresa.
+ * Cada empresa asocia estas claves a un accountId (AccountingAccount).
+ */
+export const ACCOUNT_KEYS = {
+  CLIENTES_NACIONALES: 'CLIENTES_NACIONALES',
+  CAJA: 'CAJA',
+  IVA_GENERADO: 'IVA_GENERADO',
+  INGRESOS_VENTAS: 'INGRESOS_VENTAS',
+  PROVEEDORES: 'PROVEEDORES',
+  IVA_DESCONTABLE: 'IVA_DESCONTABLE',
+  COSTOS_MERCANCIAS: 'COSTOS_MERCANCIAS',
+  INVENTARIO: 'INVENTARIO',
+  GASTOS: 'GASTOS',
+  RETENCION_FUENTE: 'RETENCION_FUENTE',
+  RETENCION_ICA: 'RETENCION_ICA',
+  RETENCION_IVA: 'RETENCION_IVA',
+} as const;
+
+export type AccountKey = (typeof ACCOUNT_KEYS)[keyof typeof ACCOUNT_KEYS];

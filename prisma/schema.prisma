@@ -1,0 +1,577 @@
+// MottaTech - Prisma Schema
+// PostgreSQL (Neon) - Multi-tenant
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  OWNER
+  CONTADOR
+  CAJERO
+  EMPLEADO
+  AUDITOR
+}
+
+// Rol por empresa (multi-contador). SuperAdmin a nivel SaaS no va en CompanyUser.
+enum CompanyUserRole {
+  OWNER
+  CONTADOR
+  AUXILIAR_CONTABLE
+  AUDITOR
+  CAJERO
+  EMPLEADO
+}
+
+enum DianDocumentType {
+  FACTURA_VENTA
+  FACTURA_POS
+  NOTA_CREDITO
+  NOTA_DEBITO
+}
+
+enum InvoiceStatus {
+  BORRADOR
+  CREADA
+  FIRMADA
+  ENVIADA
+  ACEPTADA
+  RECHAZADA
+}
+
+enum InventoryMovementType {
+  ENTRADA
+  SALIDA
+  AJUSTE
+}
+
+// ========== MULTI-TENANT ==========
+model Company {
+  id        String   @id @default(uuid())
+  name      String
+  nit       String   @unique
+  dv        Int?
+  address   String?
+  city      String?
+  country   String   @default("CO")
+  email     String?
+  phone     String?
+  logoUrl   String?
+  rutUrl    String?  // RUT adjunto DIAN
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clients           Client[]
+  suppliers         Supplier[]
+  products          Product[]
+  warehouses        Warehouse[]
+  productWarehouses ProductWarehouse[]
+  inventoryMovements InventoryMovement[]
+  invoices          Invoice[]
+  accountingAccounts AccountingAccount[]
+  accountingEntries AccountingEntry[]
+  journalEntries     AccountingJournalEntry[]
+  accountMappings   CompanyAccountMapping[]
+  posSessions       PosSession[]
+  dianConfig        DianConfig?
+  dianDocuments     DianDocument[]
+  dianResolutions   DianResolution[]
+  dianEvents        DianEvent[]
+  auditLogs         AuditLog[]
+  companyUsers      CompanyUser[]
+  developerApiKeys  DeveloperApiKey[]
+  payments          Payment[]
+  subscription      Subscription?
+}
+
+// Planes: Emprender 30k, Profesional 70k, Empresarial 300k (mensual). Anual = mensual * 12 * 0.8
+enum PlanCode {
+  EMPRENDER
+  PROFESIONAL
+  EMPRESARIAL
+}
+
+enum BillingInterval {
+  MONTHLY
+  ANNUAL
+}
+
+model Subscription {
+  id              String          @id @default(uuid())
+  companyId       String          @unique
+  planCode        PlanCode
+  billingInterval BillingInterval @default(MONTHLY)
+  periodEnd       DateTime        // fin del período pagado (facturación ELC ilimitada hasta esta fecha)
+  status          String          @default("active") // active | expired | cancelled
+  paymentId       String?         // Mercado Pago payment_id o preference_id
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@index([periodEnd])
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  password     String
+  name         String
+  active       Boolean  @default(true)
+  isSuperAdmin Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  companyUsers CompanyUser[]
+}
+
+// Pivot usuario-empresa: un usuario puede estar en varias empresas con distinto rol.
+model CompanyUser {
+  id          String         @id @default(uuid())
+  userId      String
+  companyId   String
+  role        CompanyUserRole @default(EMPLEADO)
+  permissions String?        @db.Text // JSON: { "modulos": ["contabilidad","impuestos","reportes"] }
+  invitedById String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company  Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@unique([userId, companyId])
+  @@index([companyId])
+  @@index([userId])
+}
+
+// ========== CLIENTES / PROVEEDORES ==========
+model Client {
+  id              String   @id @default(uuid())
+  companyId       String
+  name            String
+  nit             String
+  dv              Int?
+  address         String?
+  city            String?
+  country         String   @default("CO")
+  email           String?
+  phone           String?
+  personType      String   // Natural | Jurídica
+  rutResponsible  Boolean  @default(false)
+  rutCodes        String?  // JSON array códigos responsabilidad
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  company  Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+  @@index([companyId])
+  @@index([companyId, nit])
+}
+
+model Supplier {
+  id              String   @id @default(uuid())
+  companyId       String
+  name            String
+  nit             String
+  dv              Int?
+  address         String?
+  city            String?
+  country         String   @default("CO")
+  email           String?
+  phone           String?
+  personType      String
+  rutResponsible  Boolean  @default(false)
+  rutCodes        String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@index([companyId])
+}
+
+// ========== PRODUCTOS ==========
+model Product {
+  id            String   @id @default(uuid())
+  companyId     String
+  code          String
+  unspsc        String?  // Código estándar UNSPSC
+  name          String
+  description   String?
+  type          String   // Producto | Servicio
+  unit          String   @default("94") // UN/CEFACT 94 = unidad
+  price         Decimal  @db.Decimal(18, 2)
+  cost          Decimal? @db.Decimal(18, 2)
+  ivaRate       Decimal  @db.Decimal(5, 2) // 0, 5, 19
+  impoconsumo   Decimal? @db.Decimal(5, 2)
+  trackInventory Boolean @default(true)
+  minStock      Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  company   Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  warehouse ProductWarehouse[]
+  items     InvoiceItem[]
+  movements InventoryMovement[]
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+// ========== INVENTARIO ==========
+model Warehouse {
+  id        String   @id @default(uuid())
+  companyId String
+  name      String
+  code      String
+  address   String?
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  stock     ProductWarehouse[]
+  movements InventoryMovement[]
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+model ProductWarehouse {
+  id          String   @id @default(uuid())
+  companyId   String
+  productId   String
+  warehouseId String
+  quantity    Int      @default(0)
+  updatedAt   DateTime @updatedAt
+
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  @@unique([productId, warehouseId])
+  @@index([companyId])
+}
+
+model InventoryMovement {
+  id          String               @id @default(uuid())
+  companyId   String
+  type        InventoryMovementType
+  productId   String
+  warehouseId String
+  quantity    Int
+  reference   String?  // Nº factura, ajuste, etc.
+  referenceId String?
+  cost        Decimal? @db.Decimal(18, 2)
+  createdAt   DateTime @default(now())
+
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  @@index([companyId])
+  @@index([companyId, productId])
+}
+
+// ========== FACTURACIÓN Y DIAN ==========
+model Invoice {
+  id            String        @id @default(uuid())
+  companyId     String
+  clientId      String
+  type          DianDocumentType
+  prefix        String        // SETP, FVP, etc.
+  number        Int           // Número consecutivo
+  fullNumber    String        // Prefix + número para display
+  issueDate     DateTime      @db.Date
+  dueDate       DateTime?     @db.Date
+  currency      String        @default("COP")
+  subtotal      Decimal       @db.Decimal(18, 2)
+  discount      Decimal       @default(0) @db.Decimal(18, 2)
+  taxAmount     Decimal       @default(0) @db.Decimal(18, 2)
+  total         Decimal       @db.Decimal(18, 2)
+  status        InvoiceStatus @default(BORRADOR)
+  notes         String?
+  posSessionId  String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  company  Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  client   Client        @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  items    InvoiceItem[]
+  taxes    InvoiceTax[]
+  payments InvoicePayment[]
+  dianDoc  DianDocument?
+  entries  AccountingEntry[]
+  posSession PosSession? @relation(fields: [posSessionId], references: [id], onDelete: SetNull)
+  @@unique([companyId, type, prefix, number])
+  @@index([companyId])
+  @@index([companyId, status])
+  @@index([clientId])
+}
+
+model InvoiceItem {
+  id          String   @id @default(uuid())
+  invoiceId   String
+  productId   String
+  description String
+  quantity    Decimal  @db.Decimal(18, 4)
+  unit        String   @default("94")
+  unitPrice   Decimal  @db.Decimal(18, 2)
+  discount    Decimal  @default(0) @db.Decimal(18, 2)
+  subtotal    Decimal  @db.Decimal(18, 2)
+  taxAmount   Decimal  @default(0) @db.Decimal(18, 2)
+  total       Decimal  @db.Decimal(18, 2)
+  ivaRate     Decimal  @db.Decimal(5, 2)
+  order       Int      @default(0)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  @@index([invoiceId])
+}
+
+model InvoiceTax {
+  id         String   @id @default(uuid())
+  invoiceId  String
+  taxType    String   // IVA, Impoconsumo, ReteFuente, ReteICA, ReteIVA
+  rate       Decimal  @db.Decimal(5, 2)
+  base       Decimal  @db.Decimal(18, 2)
+  amount     Decimal  @db.Decimal(18, 2)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  @@index([invoiceId])
+}
+
+// ========== POS ==========
+model PosSession {
+  id           String    @id @default(uuid())
+  companyId    String
+  userId       String
+  openedAt     DateTime  @default(now())
+  closedAt     DateTime?
+  openingCash  Decimal   @default(0) @db.Decimal(18, 2)
+  closingCash  Decimal?  @db.Decimal(18, 2)
+  status       String    @default("OPEN") // OPEN | CLOSED
+
+  company Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+  @@index([companyId])
+  @@index([companyId, status])
+}
+
+model InvoicePayment {
+  id        String   @id @default(uuid())
+  invoiceId String
+  method    String   // EFECTIVO, TARJETA, TRANSFERENCIA
+  amount    Decimal  @db.Decimal(18, 2)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  @@index([invoiceId])
+}
+
+// Referencia a factura original (notas crédito/débito)
+model InvoiceReference {
+  id              String   @id @default(uuid())
+  invoiceId       String   // Nota crédito/débito
+  referencedId    String   // Factura original
+  referencedCufe  String?
+  issueDate       DateTime @db.Date
+  number          String
+}
+
+// ========== DIAN ==========
+model DianConfig {
+  id              String   @id @default(uuid())
+  companyId       String   @unique
+  env             String   // habilitacion | produccion
+  apiUrl          String?
+  clientId        String?
+  clientSecretEnc String?  // Cifrado
+  certEnc         String?  // Certificado .p12 cifrado base64
+  certPasswordEnc String?
+  technicalKey    String?  // Clave técnica DIAN
+  softwareId      String?
+  softwarePin     String?
+  prefixFe        String?  // Prefijo factura electrónica
+  prefixPos       String?
+  fromNumber      Int      @default(1)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model DianDocument {
+  id           String   @id @default(uuid())
+  companyId    String
+  invoiceId    String   @unique
+  documentType DianDocumentType
+  cufe         String?  @unique
+  xmlSent      String?  @db.Text
+  xmlResponse  String?  @db.Text
+  qrData       String?  @db.Text
+  sentAt       DateTime?
+  dianResponse String?  @db.Text
+  isValid      Boolean?
+  statusDian   String?  // ACEPTADO, RECHAZADO, PENDIENTE
+  pdfUrl       String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  @@index([companyId])
+  @@index([cufe])
+}
+
+model DianResolution {
+  id             String   @id @default(uuid())
+  companyId      String
+  resolutionNumber String
+  prefix         String
+  fromNumber     Int
+  toNumber       Int
+  fromDate       DateTime @db.Date
+  toDate         DateTime @db.Date
+  documentType   String   // FACTURA_VENTA, FACTURA_POS
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@index([companyId])
+}
+
+model DianEvent {
+  id         String   @id @default(uuid())
+  companyId  String
+  invoiceId  String?
+  eventType  String   // ENVIO, ACEPTACION, RECHAZO, NOTIFICACION
+  payload    String?  @db.Text
+  createdAt  DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@index([companyId])
+  @@index([companyId, invoiceId])
+}
+
+// ========== CONTABILIDAD ==========
+model AccountingJournalEntry {
+  id             String   @id @default(uuid())
+  companyId      String
+  documentType   String   // FACTURA_VENTA, FACTURA_POS, NOTA_CREDITO, NOTA_DEBITO, COMPRA
+  documentNumber String
+  documentId    String?  // invoiceId o purchaseId
+  date          DateTime @db.Date
+  totalDebit    Decimal  @db.Decimal(18, 2)
+  totalCredit   Decimal  @db.Decimal(18, 2)
+  description   String?
+  createdAt     DateTime @default(now())
+
+  company Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  lines   AccountingEntry[]
+  @@index([companyId])
+  @@index([companyId, date])
+}
+
+model CompanyAccountMapping {
+  id         String @id @default(uuid())
+  companyId  String
+  accountKey String // CLIENTES_NACIONALES, CAJA, IVA_GENERADO, INGRESOS_VENTAS, PROVEEDORES, IVA_DESCONTABLE, COSTOS, GASTOS, RETENCION_FUENTE, RETENCION_ICA, RETENCION_IVA
+  accountId  String
+
+  company Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  account AccountingAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  @@unique([companyId, accountKey])
+  @@index([companyId])
+}
+
+model AccountingEntry {
+  id              String   @id @default(uuid())
+  companyId       String
+  journalEntryId  String?
+  accountId       String
+  invoiceId       String?
+  date            DateTime @db.Date
+  description     String
+  debit           Decimal  @default(0) @db.Decimal(18, 2)
+  credit          Decimal  @default(0) @db.Decimal(18, 2)
+  reference       String?
+  createdAt       DateTime @default(now())
+
+  company      Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  journalEntry AccountingJournalEntry? @relation(fields: [journalEntryId], references: [id], onDelete: SetNull)
+  account      AccountingAccount       @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  invoice      Invoice?                @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  @@index([companyId])
+  @@index([companyId, date])
+  @@index([accountId])
+  @@index([journalEntryId])
+}
+
+model AccountingAccount {
+  id          String   @id @default(uuid())
+  companyId   String
+  code        String   // PUC
+  name        String
+  parentCode  String?
+  level       Int
+  type        String   // Activo, Pasivo, Patrimonio, Ingreso, Gasto, Costo
+  allowMovement Boolean @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company   Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  entries   AccountingEntry[]
+  mappings  CompanyAccountMapping[]
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+// ========== AUDITORÍA ==========
+model AuditLog {
+  id         String   @id @default(uuid())
+  companyId  String
+  userId     String?
+  action     String
+  entity     String
+  entityId   String?
+  payload    String?  @db.Text
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@index([companyId])
+  @@index([companyId, createdAt])
+}
+
+// ========== MODO DEVELOPER - API keys para sitios/apps externos que facturan ELC ==========
+model DeveloperApiKey {
+  id          String    @id @default(uuid())
+  companyId   String
+  name        String    // ej. "Mi tienda web", "App móvil"
+  keyPrefix   String    // primeros 8 chars para identificar (ej. myr_xxxx)
+  keyHash     String    // hash de la key completa (nunca guardar la key en claro)
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@unique([companyId, name])
+  @@index([keyPrefix])
+}
+
+// ========== PAGOS (Mercado Pago u otra pasarela) ==========
+model Payment {
+  id            String    @id @default(uuid())
+  companyId     String
+  invoiceId     String?   // factura asociada si aplica
+  externalId    String?   // id en la pasarela (ej. preference_id, payment_id)
+  gateway       String    // MERCADOPAGO | ...
+  amount        Decimal   @db.Decimal(18, 2)
+  currency      String    @default("COP")
+  status        String    // pending | approved | rejected | refunded
+  metadata      String?   @db.Text // JSON
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  @@index([companyId])
+  @@index([externalId])
+}
