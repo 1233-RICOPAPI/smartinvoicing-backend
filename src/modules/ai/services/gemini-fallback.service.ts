@@ -1,23 +1,24 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
+
+interface GeminiGenerateContentResponse {
+  candidates?: Array<{
+    content?: { parts?: Array<{ text?: string }> };
+  }>;
+}
+
 /**
- * Opción B: cuando GEMINI_API_KEY esté en .env, se puede usar para
- * responder preguntas que no tengan datos en la base (UNKNOWN) o para
- * enriquecer respuestas. Sin API key no se llama a Gemini.
- *
- * Para activar: agregar en .env:
- *   GEMINI_API_KEY=tu_api_key_de_google_ai_studio
- *
- * Luego en este servicio implementar la llamada a la API de Gemini (ej. generateContent)
- * con un prompt que incluya el contexto de la empresa y la pregunta del usuario.
+ * Fallback con Google Gemini cuando la pregunta no tiene datos en BD (UNKNOWN/EXPLAIN).
+ * Lee GEMINI_API_KEY desde ConfigService (env). Sin key no llama a la API y retorna string vacío.
  */
 @Injectable()
 export class GeminiFallbackService {
   private readonly apiKey: string | undefined;
 
   constructor(private readonly config: ConfigService) {
-    this.apiKey = this.config.get<string>('GEMINI_API_KEY');
+    this.apiKey = this.config.get<string>('GEMINI_API_KEY') ?? process.env.GEMINI_API_KEY;
   }
 
   isConfigured(): boolean {
@@ -25,21 +26,45 @@ export class GeminiFallbackService {
   }
 
   /**
-   * Si Gemini está configurado, intenta obtener una respuesta para preguntas
-   * sin datos en BD. Retorna null si no hay key o si falla.
+   * Envía el prompt a Gemini y retorna la respuesta en texto.
+   * Si no hay API key retorna ''. Si la API falla retorna '' (el Copilot usará su fallback).
    */
-  async ask(question: string, context?: { companyName?: string }): Promise<string | null> {
-    if (!this.isConfigured()) return null;
+  async ask(prompt: string, context?: { companyName?: string }): Promise<string> {
+    const key = this.apiKey?.trim();
+    if (!key) {
+      return '';
+    }
+    const systemContext = context?.companyName
+      ? `Contexto: empresa "${context.companyName}".`
+      : 'Contexto: software de facturación electrónica y contabilidad en Colombia.';
+    const fullPrompt = `Eres un asistente de facturación electrónica y contabilidad en Colombia. Responde de forma breve y clara en español. ${systemContext} Pregunta del usuario: ${prompt}`;
+
     try {
-      // TODO: cuando tengas la API key, descomentar y usar @google/generative-ai o fetch:
-      // const { GoogleGenerativeAI } = require('@google/generative-ai');
-      // const genAI = new GoogleGenerativeAI(this.apiKey);
-      // const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
-      // const result = await model.generateContent(`Eres un asistente de facturación y contabilidad en Colombia. Responde brevemente en español. Contexto: ${context?.companyName ?? 'Empresa'}. Pregunta: ${question}`);
-      // return result.response.text();
-      return null;
-    } catch {
-      return null;
+      const url = `${GEMINI_API_BASE}?key=${encodeURIComponent(key)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: fullPrompt }] }],
+          generationConfig: {
+            maxOutputTokens: 512,
+            temperature: 0.4,
+          },
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.warn(`[GeminiFallback] API error ${res.status}: ${errText.slice(0, 200)}`);
+        return '';
+      }
+
+      const data = (await res.json()) as GeminiGenerateContentResponse;
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      return text ?? '';
+    } catch (err) {
+      console.warn('[GeminiFallback] Request failed:', err instanceof Error ? err.message : err);
+      return '';
     }
   }
 }

@@ -10,6 +10,7 @@ import { QueryEngineService } from './query-engine.service';
 import { ReasoningService } from './reasoning.service';
 import { COPILOT_INTENTS } from '../constants/intents';
 import type { CopilotResponseDto } from '../dtos/copilot-query.dto';
+import { GeminiFallbackService } from './gemini-fallback.service';
 
 const FALLBACK_ANSWER = 'No encontré contenido relacionado con tu pregunta en la base de datos. Puedes preguntar por: balance general, estado de resultados, facturación, IVA, retenciones, comparación o anomalías.';
 
@@ -19,6 +20,7 @@ export class CopilotService {
     private readonly intentParser: IntentParserService,
     private readonly queryEngine: QueryEngineService,
     private readonly reasoning: ReasoningService,
+    private readonly geminiFallback: GeminiFallbackService,
     @InjectModel(CopilotConversation.name)
     private readonly conversationModel: Model<CopilotConversationDocument>,
     @InjectModel(CopilotCache.name)
