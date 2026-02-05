@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConfigModule } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { GuardsModule } from './common/guards/guards.module';
@@ -26,19 +26,45 @@ import { DeveloperModule } from './modules/developer/developer.module';
 const skipMongo =
   process.env.SKIP_MONGODB === '1' || process.env.SKIP_MONGODB === 'true';
 
+/**
+ * URI de MongoDB desde env. En producción (Cloud Run) inyectar vía Secret Manager
+ * como MONGO_URI o MONGODB_URI. Una sola conexión por instancia; Mongoose reutiliza el pool.
+ */
+function getMongoUri(): string {
+  const uri =
+    process.env.MONGO_URI?.trim() || process.env.MONGODB_URI?.trim() || '';
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (isProduction && !uri) {
+    throw new Error(
+      'MongoDB: MONGO_URI (o MONGODB_URI) es obligatoria en producción. Configúrela en Cloud Run (Secret Manager).',
+    );
+  }
+  if (!uri && !isProduction) {
+    return 'mongodb://localhost:27017/mottatech';
+  }
+  return uri;
+}
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, envFilePath: '.env' }),
+    // Una sola conexión al arranque; Mongoose reutiliza el pool. No abrir conexión por request:
+    // evita latencia, agotamiento de conexiones en Atlas y no escala en Cloud Run (instancias efímeras).
+    // Schemas: MongooseModule.forFeature() en cada módulo (ej. AiModule → copilot-cache.schema.ts).
     ...(skipMongo
       ? []
       : [
           MongooseModule.forRootAsync({
-            useFactory: (config: ConfigService) => ({
-              uri: config.get('MONGODB_URI', 'mongodb://localhost:27017/mottatech'),
-              serverSelectionTimeoutMS: 10_000,
-              retryWrites: false,
-            }),
-            inject: [ConfigService],
+            useFactory: () => {
+              const uri = getMongoUri();
+              return {
+                uri,
+                serverSelectionTimeoutMS: 15_000,
+                retryWrites: true,
+                maxPoolSize: 10,
+                minPoolSize: 1,
+              };
+            },
           }),
         ]),
     PrismaModule,
